@@ -23,6 +23,10 @@
 
 * { box-sizing: border-box; }
 
+/* El atributo HTML [hidden] tiene que ganarle a cualquier display: flex/grid/etc.
+   que pongamos en .loading, .empty-box, .error-box, .modal, etc. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
