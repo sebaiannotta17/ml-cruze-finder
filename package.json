@@ -1,8 +1,9 @@
 {
   "name": "ml-cruze-finder",
   "version": "1.0.0",
-  "description": "Buscador de Chevrolet Cruze LTZ Plus y variantes en Buenos Aires usando la API pública de Mercado Libre.",
+  "description": "Buscador de Chevrolet Cruze LTZ Plus y variantes en Buenos Aires usando la API de Mercado Libre.",
   "private": true,
+  "type": "module",
   "engines": {
     "node": ">=18"
   }
