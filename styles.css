@@ -114,6 +114,38 @@ a:hover { text-decoration: underline; }
   color: #cbd5e1;
 }
 
+.pill .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+  display: inline-block;
+}
+.pill.pill-ok .dot { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.20); }
+.pill.pill-warn .dot { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,0.25); }
+.pill.pill-err .dot { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,0.25); }
+.pill.pill-ok { background: rgba(34,197,94,0.10); color: #bbf7d0; }
+.pill.pill-warn { background: rgba(245,158,11,0.12); color: #fde68a; }
+.pill.pill-err { background: rgba(239,68,68,0.12); color: #fecaca; }
+
+/* Banner de auth requerida */
+.auth-banner {
+  padding: 16px 18px;
+  background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+  border: 1px solid #fed7aa;
+  border-radius: var(--radius-md);
+  color: #7c2d12;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.auth-banner strong { display: block; margin-bottom: 2px; color: #431407; }
+.auth-banner .btn-primary { background: #ea580c; box-shadow: 0 6px 14px rgba(234,88,12,0.30); }
+.auth-banner .btn-primary:hover { background: #c2410c; }
+
 /* Hero */
 .hero {
   background: linear-gradient(180deg, #ffffff 0%, #f6f7fb 100%);

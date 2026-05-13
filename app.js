@@ -186,6 +186,12 @@ async function searchOnce(query, { stateId, offset = 0, limit = 50 } = {}) {
 
   const url = `${PROXY_SEARCH}?${params}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (res.status === 401) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.message || "La app no está autorizada con Mercado Libre.");
+    err.code = "no_token";
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(`Mercado Libre respondió ${res.status} para "${query}"`);
   }
@@ -248,6 +254,16 @@ async function runSearch({ append = false } = {}) {
     }
 
     if (okResults === 0) {
+      // Si todas las búsquedas fallaron por falta de auth, mostramos banner y salimos.
+      const authError = results.find(
+        (r) => r.status === "rejected" && r.reason?.code === "no_token"
+      );
+      if (authError) {
+        showAuthBanner();
+        throw new Error(
+          "La app aún no está autorizada con Mercado Libre. Hacé click en 'Conectar Mercado Libre' arriba."
+        );
+      }
       throw new Error("No se pudo conectar con la API de Mercado Libre.");
     }
 
@@ -592,6 +608,89 @@ function updateLastUpdate() {
 }
 
 // ------------------------------------------------------------
+// Estado de conexión con Mercado Libre
+// ------------------------------------------------------------
+async function checkAuthStatus() {
+  try {
+    const r = await fetch("/api/auth/status", { headers: { Accept: "application/json" } });
+    const s = await r.json();
+    renderAuthStatus(s);
+    return s;
+  } catch (e) {
+    renderAuthStatus({ connected: false, error: e?.message });
+    return { connected: false };
+  }
+}
+
+function renderAuthStatus(s) {
+  const pill = $("#connStatus");
+  const text = $("#connStatusText");
+  const btn = $("#connectBtn");
+  pill.classList.remove("pill-ok", "pill-warn", "pill-err", "pill-muted");
+
+  if (!s.has_credentials) {
+    pill.classList.add("pill-err");
+    text.textContent = "Faltan credenciales";
+    btn.hidden = true;
+    return;
+  }
+  if (!s.kv_configured) {
+    pill.classList.add("pill-err");
+    text.textContent = "KV no configurado";
+    btn.hidden = true;
+    showKvWarning();
+    return;
+  }
+  if (!s.connected) {
+    pill.classList.add("pill-warn");
+    text.textContent = "Sin autorizar";
+    btn.hidden = false;
+    showAuthBanner();
+    return;
+  }
+  pill.classList.add("pill-ok");
+  text.textContent = s.user_id ? `Conectado · ${s.user_id}` : "Conectado";
+  btn.hidden = true;
+  hideAuthBanner();
+}
+
+function showAuthBanner() {
+  if ($("#authBanner")) return;
+  const banner = document.createElement("div");
+  banner.id = "authBanner";
+  banner.className = "auth-banner";
+  banner.innerHTML = `
+    <div>
+      <strong>Falta autorizar la app con Mercado Libre</strong>
+      <span>Hacé click acá una sola vez para que la página pueda traer publicaciones reales en vivo.</span>
+    </div>
+    <a class="btn btn-primary" href="/api/auth/login">Autorizar ahora →</a>
+  `;
+  const results = $(".results");
+  results.insertBefore(banner, results.firstChild);
+}
+
+function hideAuthBanner() {
+  const b = $("#authBanner");
+  if (b) b.remove();
+}
+
+function showKvWarning() {
+  if ($("#authBanner")) return;
+  const banner = document.createElement("div");
+  banner.id = "authBanner";
+  banner.className = "auth-banner";
+  banner.innerHTML = `
+    <div>
+      <strong>Falta activar Vercel KV</strong>
+      <span>El proyecto necesita una base KV para guardar el token. Andá a Vercel → Storage → Create Database → KV (Upstash Redis), linkealo a este proyecto y redeployá.</span>
+    </div>
+  `;
+  const results = $(".results");
+  results.insertBefore(banner, results.firstChild);
+}
+
+// ------------------------------------------------------------
 // Render variant chips
 // ------------------------------------------------------------
 function renderVariantChips() {
@@ -684,9 +783,12 @@ function init() {
     if (e.key === "Escape") closeModal();
   });
 
-  // Cargar al inicio
+  // Verificar el estado de auth y luego correr la búsqueda inicial.
   readFiltersFromUI();
-  runSearch({ append: false });
+  checkAuthStatus().then((s) => {
+    if (s?.connected) runSearch({ append: false });
+    else showLoading(false); // que no quede el spinner
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);
