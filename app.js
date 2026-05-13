@@ -800,12 +800,7 @@ async function handleDetect() {
     }
 
     msg.className = "detect-msg ok";
-    const fields = touched === 1 ? "1 campo actualizado" : `${touched} campos actualizados`;
-    if (data.autofill_source === "html_scrape") {
-      msg.innerHTML = `Autocompletado desde la página pública de ML · ${fields}. <em>(La API oficial está restringida; algunos campos como transmisión / km pueden venir vacíos — completalos a mano.)</em>`;
-    } else {
-      msg.textContent = `Autocompletado desde Mercado Libre · ${fields}.`;
-    }
+    msg.textContent = `Autocompletado desde Mercado Libre · ${touched} campo${touched !== 1 ? "s" : ""} actualizado${touched !== 1 ? "s" : ""}.`;
   } catch (err) {
     msg.className = "detect-msg err";
     msg.textContent = err.message || "No se pudo autocompletar.";
