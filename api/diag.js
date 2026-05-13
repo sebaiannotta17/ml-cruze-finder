@@ -1,14 +1,15 @@
-// Endpoint de diagnóstico TEMPORAL ampliado.
-// Prueba múltiples endpoints y combinaciones de headers para encontrar
-// cuál funciona y cuál bloquea ML. Borrar cuando todo funcione.
+// Endpoint de diagnóstico — verifica todo el flujo con el token de USUARIO
+// obtenido vía Authorization Code (no client_credentials).
+// Borrar cuando todo funcione.
 
-import { ML_BASE, getMlAccessToken } from "./_ml.js";
+import { ML_BASE, getValidAccessToken } from "./_ml.js";
+import { isKvConfigured, kvGet } from "./_kv.js";
 
 function mask(value) {
   if (!value) return null;
   const s = String(value);
   if (s.length <= 6) return "***";
-  return `${s.slice(0, 3)}...${s.slice(-3)} (len=${s.length})`;
+  return `${s.slice(0, 4)}...${s.slice(-4)} (len=${s.length})`;
 }
 
 async function probe(label, url, headers) {
@@ -16,15 +17,16 @@ async function probe(label, url, headers) {
     const r = await fetch(url, { headers });
     const text = await r.text();
     let body = null;
-    try { body = JSON.parse(text); } catch { body = text.slice(0, 200); }
+    try { body = JSON.parse(text); } catch { body = text.slice(0, 250); }
     return {
       label,
       status: r.status,
       ok: r.ok,
       reqId: r.headers.get("x-request-id"),
-      body: typeof body === "object"
-        ? { keys: Object.keys(body).slice(0, 8), preview: JSON.stringify(body).slice(0, 200) }
-        : body,
+      content_type: r.headers.get("content-type"),
+      results: Array.isArray(body?.results) ? body.results.length : null,
+      paging: body?.paging,
+      preview: typeof body === "object" ? JSON.stringify(body).slice(0, 240) : body,
     };
   } catch (e) {
     return { label, error: e?.message };
@@ -32,86 +34,95 @@ async function probe(label, url, headers) {
 }
 
 export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+
   const out = {
     env: {
       ML_CLIENT_ID: mask(process.env.ML_CLIENT_ID),
       ML_CLIENT_SECRET: mask(process.env.ML_CLIENT_SECRET),
+      KV_REST_API_URL: !!process.env.KV_REST_API_URL,
+      KV_REST_API_TOKEN: !!process.env.KV_REST_API_TOKEN,
+      UPSTASH_REDIS_REST_URL: !!process.env.UPSTASH_REDIS_REST_URL,
+      UPSTASH_REDIS_REST_TOKEN: !!process.env.UPSTASH_REDIS_REST_TOKEN,
       VERCEL_REGION: process.env.VERCEL_REGION,
       NODE_VERSION: process.version,
     },
-    oauth: null,
+    kv_configured: isKvConfigured(),
+    auth: null,
     probes: [],
   };
 
-  let token = null;
-  try {
-    token = await getMlAccessToken();
-    out.oauth = { ok: true, token: mask(token) };
-  } catch (e) {
-    out.oauth = { ok: false, error: e?.message, upstream: e?.upstream };
-    res.setHeader("Cache-Control", "no-store");
+  if (!isKvConfigured()) {
     res.status(200).json(out);
     return;
   }
 
-  const baseHeaders = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-  };
+  try {
+    const refresh = await kvGet("ml:refresh_token").catch(() => null);
+    const userId = await kvGet("ml:user_id").catch(() => null);
+    out.auth = {
+      has_refresh_token: !!refresh,
+      refresh_preview: mask(refresh),
+      user_id: userId,
+    };
+  } catch (e) {
+    out.auth = { error: e?.message };
+  }
+
+  let token = null;
+  try {
+    token = await getValidAccessToken();
+    out.auth.access_token_preview = mask(token);
+    out.auth.access_token_ok = true;
+  } catch (e) {
+    out.auth.access_token_ok = false;
+    out.auth.access_token_error = e?.message;
+    out.auth.upstream = e?.upstream;
+    res.status(200).json(out);
+    return;
+  }
+
+  const authHeader = { Authorization: `Bearer ${token}`, Accept: "application/json" };
   const browserish = {
-    ...baseHeaders,
+    ...authHeader,
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+    "Accept-Language": "es-AR,es;q=0.9",
     Origin: "https://www.mercadolibre.com.ar",
     Referer: "https://www.mercadolibre.com.ar/",
   };
 
-  // 1) /users/me — confirma que el token sirve para algo autenticado
-  out.probes.push(await probe("users/me", `${ML_BASE}/users/me`, baseHeaders));
+  // Confirmar que el token funciona en endpoints simples
+  out.probes.push(await probe("users/me", `${ML_BASE}/users/me`, authHeader));
 
-  // 2) /sites/MLA — info del sitio (público)
-  out.probes.push(await probe("sites/MLA", `${ML_BASE}/sites/MLA`, baseHeaders));
-
-  // 3) /categories/MLA1744 — info de categoría (público)
-  out.probes.push(await probe("categories/MLA1744", `${ML_BASE}/categories/MLA1744`, baseHeaders));
-
-  // 4) Search simple sin filtros, con UA mínimo
+  // Search variantes
   out.probes.push(await probe(
     "search:basic",
     `${ML_BASE}/sites/MLA/search?q=cruze&limit=1`,
-    baseHeaders,
+    authHeader,
   ));
 
-  // 5) Search con headers de browser-like (Origin, Referer, UA real)
+  out.probes.push(await probe(
+    "search:no-q-no-category",
+    `${ML_BASE}/sites/MLA/search?seller_id=${out.auth.user_id || "1088064370"}&limit=1`,
+    authHeader,
+  ));
+
   out.probes.push(await probe(
     "search:browserish",
-    `${ML_BASE}/sites/MLA/search?q=cruze&limit=1`,
+    `${ML_BASE}/sites/MLA/search?q=cruze&category=MLA1744&limit=1`,
     browserish,
   ));
 
-  // 6) Search por categoría (sin q)
-  out.probes.push(await probe(
-    "search:category-only",
-    `${ML_BASE}/sites/MLA/search?category=MLA1744&limit=1`,
-    browserish,
-  ));
+  // Search "por mí" (debería poder ver MIS items)
+  if (out.auth.user_id) {
+    out.probes.push(await probe(
+      "users/{id}/items/search",
+      `${ML_BASE}/users/${out.auth.user_id}/items/search?limit=1`,
+      authHeader,
+    ));
+  }
 
-  // 7) Highlights / public listing
-  out.probes.push(await probe(
-    "highlights",
-    `${ML_BASE}/highlights/MLA/category/MLA1744`,
-    browserish,
-  ));
-
-  // 8) Item público específico (id genérico de prueba)
-  out.probes.push(await probe(
-    "item:fixed",
-    `${ML_BASE}/items/MLA1234567890`,
-    baseHeaders,
-  ));
-
-  res.setHeader("Cache-Control", "no-store");
   res.status(200).json(out);
 }
