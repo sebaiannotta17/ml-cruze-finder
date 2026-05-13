@@ -41,6 +41,7 @@ const SOURCES = [
 const state = {
   items: [], // todas las listings cargadas del backend
   loading: false,
+  formPhotos: [], // array de strings (URL https:// o data:image/...) del form en uso
   filters: {
     text: "",
     variants: new Set(VARIANTS.map((v) => v.id)),
@@ -519,12 +520,11 @@ function openFormModal(item = null) {
     location: item?.location || "",
     description: item?.description || "",
     notes: item?.notes || "",
-    photos: (item?.photos || []).join("\n"),
     rating: item?.rating ?? "",
   });
 
   renderRatingStars(item?.rating ?? null);
-  renderPhotosPreview(item?.photos || []);
+  setFormPhotos(item?.photos || []);
 
   $("#formDeleteBtn").hidden = !item;
   openModal(modal);
@@ -544,10 +544,7 @@ function readFormValues() {
   const fd = new FormData(f);
   const obj = Object.fromEntries(fd.entries());
 
-  const photos = (obj.photos || "")
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const photos = state.formPhotos.slice();
 
   return {
     url: (obj.url || "").trim(),
@@ -598,14 +595,149 @@ function renderRatingStars(rating) {
   }
 }
 
-function renderPhotosPreview(urls) {
-  const wrap = $("#photosPreview");
+// ------------------------------------------------------------
+// Manejo del array de fotos del formulario
+// ------------------------------------------------------------
+const PHOTO_MAX_BYTES = 900 * 1024;      // ~900 KB por foto (post-compresión)
+const PHOTOS_BUDGET_BYTES = 850 * 1024;  // KV warning umbral total
+const PHOTOS_HARD_LIMIT_BYTES = 1024 * 1024; // 1 MB - error duro
+
+function setFormPhotos(photos) {
+  state.formPhotos = Array.isArray(photos) ? photos.slice() : [];
+  renderPhotosList();
+}
+
+function addFormPhoto(value) {
+  if (!value || typeof value !== "string") return;
+  state.formPhotos.push(value);
+  renderPhotosList();
+}
+
+function removeFormPhoto(index) {
+  state.formPhotos.splice(index, 1);
+  renderPhotosList();
+}
+
+function approxBytes(str) {
+  // Para data URLs base64 esto es muy preciso; para URLs es despreciable.
+  if (!str) return 0;
+  if (str.startsWith("data:")) {
+    const b64 = str.split(",", 2)[1] || "";
+    return Math.floor((b64.length * 3) / 4);
+  }
+  return str.length;
+}
+
+function totalPhotosBytes() {
+  return state.formPhotos.reduce((a, p) => a + approxBytes(p), 0);
+}
+
+function fmtKB(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function renderPhotosList() {
+  const wrap = $("#photosList");
   wrap.innerHTML = "";
-  for (const u of urls.slice(0, 12)) {
+
+  for (let i = 0; i < state.formPhotos.length; i++) {
+    const p = state.formPhotos[i];
+    const isData = p.startsWith("data:");
     const div = document.createElement("div");
-    div.className = "thumb";
-    div.style.backgroundImage = `url('${u.replace(/'/g, "%27")}')`;
+    div.className = "photo-item";
+    div.style.backgroundImage = `url("${p.replace(/"/g, "%22")}")`;
+    div.innerHTML = `
+      <button type="button" class="remove-photo" title="Quitar foto" data-idx="${i}">&times;</button>
+      <span class="photo-badge">${isData ? "subida" : "URL"}</span>
+    `;
+    div.querySelector(".remove-photo").addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      removeFormPhoto(Number(e.currentTarget.dataset.idx));
+    });
     wrap.appendChild(div);
+  }
+
+  // Indicador de peso total
+  const sizeEl = $("#photosSize");
+  if (state.formPhotos.length === 0) {
+    sizeEl.textContent = "";
+    sizeEl.className = "photos-size";
+  } else {
+    const total = totalPhotosBytes();
+    sizeEl.textContent = `${state.formPhotos.length} foto${state.formPhotos.length !== 1 ? "s" : ""} · ${fmtKB(total)}`;
+    sizeEl.className = "photos-size" +
+      (total >= PHOTOS_HARD_LIMIT_BYTES ? " err" :
+       total >= PHOTOS_BUDGET_BYTES ? " warn" : "");
+  }
+}
+
+// Comprimir una imagen a JPEG via canvas. Devuelve data URL.
+async function compressImage(file, { maxWidth = 1200, maxHeight = 900, quality = 0.72 } = {}) {
+  const dataUrl = await new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(new Error("No se pudo leer el archivo."));
+    fr.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error("Archivo no es una imagen válida."));
+    i.src = dataUrl;
+  });
+  let w = img.naturalWidth || img.width;
+  let h = img.naturalHeight || img.height;
+  const scale = Math.min(1, maxWidth / w, maxHeight / h);
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff"; // PNG con alpha -> blanco en JPEG
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+
+  let out = canvas.toDataURL("image/jpeg", quality);
+  // Si quedó muy grande, hacemos un segundo pase con menos calidad
+  if (approxBytes(out) > PHOTO_MAX_BYTES && quality > 0.5) {
+    out = canvas.toDataURL("image/jpeg", 0.6);
+  }
+  if (approxBytes(out) > PHOTO_MAX_BYTES) {
+    // Última instancia: bajamos resolución
+    const canvas2 = document.createElement("canvas");
+    canvas2.width = Math.round(w * 0.75);
+    canvas2.height = Math.round(h * 0.75);
+    const ctx2 = canvas2.getContext("2d");
+    ctx2.fillStyle = "#ffffff";
+    ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
+    ctx2.drawImage(canvas, 0, 0, canvas2.width, canvas2.height);
+    out = canvas2.toDataURL("image/jpeg", 0.6);
+  }
+  return out;
+}
+
+async function handlePhotoFiles(files) {
+  const arr = Array.from(files || []).filter((f) => f && f.type && f.type.startsWith("image/"));
+  if (!arr.length) return;
+
+  const dz = $("#photoDropzone");
+  dz.classList.add("is-busy");
+  try {
+    for (const file of arr) {
+      try {
+        const dataUrl = await compressImage(file);
+        addFormPhoto(dataUrl);
+      } catch (e) {
+        console.error("compressImage failed", e);
+      }
+      if (state.formPhotos.length >= 20) break;
+    }
+  } finally {
+    dz.classList.remove("is-busy");
   }
 }
 
@@ -659,12 +791,10 @@ async function handleDetect() {
       }
     }
 
-    // Photos: sólo pisamos si el textarea está vacío
+    // Photos: sólo pisamos si todavía no hay fotos cargadas
     if (Array.isArray(data.photos) && data.photos.length) {
-      const photosEl = $("#f_photos");
-      if (!photosEl.value.trim()) {
-        photosEl.value = data.photos.join("\n");
-        renderPhotosPreview(data.photos);
+      if (state.formPhotos.length === 0) {
+        setFormPhotos(data.photos);
         touched++;
       }
     }
@@ -946,15 +1076,92 @@ function init() {
     confirmDelete(item);
   });
 
-  // Preview de fotos al editar el textarea
-  $("#f_photos").addEventListener("input", () => {
-    const urls = $("#f_photos").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    renderPhotosPreview(urls);
-  });
+  // Dropzone de fotos: click, drop, paste, file picker
+  wirePhotoDropzone();
 
   // Carga inicial
   checkAuthStatus();
   loadListings();
+}
+
+function wirePhotoDropzone() {
+  const dz = $("#photoDropzone");
+  const fileInput = $("#photoFileInput");
+
+  dz.addEventListener("click", () => fileInput.click());
+  dz.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      fileInput.click();
+    }
+  });
+
+  fileInput.addEventListener("change", (e) => {
+    handlePhotoFiles(e.target.files);
+    fileInput.value = ""; // permite re-elegir el mismo archivo
+  });
+
+  // Drag & drop
+  ["dragenter", "dragover"].forEach((ev) => {
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dz.classList.add("is-dragover");
+    });
+  });
+  ["dragleave", "dragend", "drop"].forEach((ev) => {
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dz.classList.remove("is-dragover");
+    });
+  });
+  dz.addEventListener("drop", (e) => {
+    if (e.dataTransfer?.files?.length) {
+      handlePhotoFiles(e.dataTransfer.files);
+    }
+  });
+
+  // Paste (Ctrl+V) — sólo cuando el form modal está abierto
+  document.addEventListener("paste", (e) => {
+    const formModal = $("#formModal");
+    if (!formModal || formModal.hidden) return;
+    // Si el foco está en un input de texto que no es el de URL, no interceptamos
+    // (para no robarle pastes de texto a description/notes/etc).
+    const active = document.activeElement;
+    const isTextField = active && (
+      active.tagName === "TEXTAREA" ||
+      (active.tagName === "INPUT" && !["file", "checkbox", "radio"].includes(active.type))
+    );
+    const items = e.clipboardData?.items || [];
+    const files = [];
+    for (const it of items) {
+      if (it.kind === "file" && it.type && it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) {
+      // Hay imagen real en el clipboard: la procesamos sí o sí.
+      e.preventDefault();
+      handlePhotoFiles(files);
+      return;
+    }
+    // Si no hay imagen, dejamos que el paste de texto siga su curso normal.
+    if (isTextField) return;
+  });
+
+  // Botón "+ Agregar foto por URL"
+  $("#addPhotoUrlBtn").addEventListener("click", () => {
+    const url = window.prompt("Pegá la URL de la foto (https://…):", "");
+    if (!url) return;
+    const trimmed = url.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      alert("La URL tiene que arrancar con http:// o https://");
+      return;
+    }
+    addFormPhoto(trimmed);
+  });
 }
 
 document.addEventListener("DOMContentLoaded", init);

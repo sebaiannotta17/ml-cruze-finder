@@ -309,9 +309,24 @@
 
         <div class="form-row">
           <div class="form-group form-group-grow">
-            <label for="f_photos">Fotos (una URL por línea)</label>
-            <textarea id="f_photos" name="photos" rows="3" placeholder="https://http2.mlstatic.com/...-O.jpg&#10;https://http2.mlstatic.com/...-O.jpg"></textarea>
-            <div id="photosPreview" class="photos-preview"></div>
+            <label>Fotos</label>
+            <div id="photoDropzone" class="dropzone" tabindex="0" role="button" aria-label="Subir fotos">
+              <input id="photoFileInput" type="file" accept="image/*" multiple hidden />
+              <div class="dropzone-inner">
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <div class="dropzone-title">Click para elegir fotos · arrastrá archivos · o pegá con <kbd>Ctrl</kbd>+<kbd>V</kbd></div>
+                <div class="dropzone-sub">JPG / PNG / WEBP — se comprimen automáticamente</div>
+              </div>
+            </div>
+            <div id="photosList" class="photos-list" aria-live="polite"></div>
+            <div class="photos-toolbar">
+              <span id="photosSize" class="photos-size"></span>
+              <button id="addPhotoUrlBtn" class="link-btn" type="button">+ Agregar foto por URL</button>
+            </div>
           </div>
         </div>
 

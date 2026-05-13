@@ -93,11 +93,17 @@ function asEnum(v, allowed) {
   return allowed.includes(s) ? s : null;
 }
 
-function asUrlArray(v) {
+function asPhotoArray(v) {
   if (!v) return [];
   const arr = Array.isArray(v) ? v : [v];
   return arr
-    .map((u) => asString(u, 2000))
+    .map((u) => {
+      const s = asString(u, 2_500_000); // hasta ~1.8 MB en base64 (data URL)
+      if (!s) return null;
+      // Aceptamos http(s):// (URL externa) o data:image/... (foto comprimida embebida)
+      if (/^https?:\/\//i.test(s) || /^data:image\//i.test(s)) return s;
+      return null;
+    })
     .filter(Boolean)
     .slice(0, 20);
 }
@@ -177,8 +183,8 @@ export function normalizeListing(input, { mode = "create", existing = null } = {
   if (input.description !== undefined) out.description = asString(input.description, 8000);
   if (input.notes !== undefined) out.notes = asString(input.notes, 8000);
 
-  // photos
-  if (input.photos !== undefined) out.photos = asUrlArray(input.photos);
+  // photos (acepta URLs https:// o data URLs base64)
+  if (input.photos !== undefined) out.photos = asPhotoArray(input.photos);
   else if (mode === "create") out.photos = [];
 
   // status (default: interesado)
