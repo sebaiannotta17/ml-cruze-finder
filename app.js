@@ -1,88 +1,59 @@
 /* ============================================================
- *  Cruze LTZ Finder
- *  Buscador en vivo de Chevrolet Cruze LTZ Plus y variantes en
- *  Buenos Aires, consumiendo la API pública de Mercado Libre.
+ *  Cruze LTZ Tracker — Frontend
+ *  Gestor manual de publicaciones de autos (Mercado Libre +
+ *  Facebook Marketplace) guardadas en Vercel KV.
  * ============================================================ */
 
-// En vez de pegarle directo a https://api.mercadolibre.com (que actualmente
-// responde 403 a requests cross-origin desde el navegador), usamos los
-// proxies serverless en /api/* que viven en este mismo deploy de Vercel.
-// Ver: api/search.js y api/description.js
-const PROXY_SEARCH = "/api/search";
-const PROXY_DESCRIPTION = "/api/description";
-const SITE = "MLA"; // Mercado Libre Argentina
-const CATEGORY_AUTOS = "MLA1744"; // Autos, Camionetas y Utilitarios
-
-// IDs reales de estados de ML Argentina, verificados desde
-// https://api.mercadolibre.com/classified_locations/countries/AR
-// Mercado Libre clasifica los items con IDs granulares (no usa una
-// sola "Provincia de Buenos Aires"), por eso para GBA hay 3 IDs.
-const STATE_IDS = {
-  capital_federal: "TUxBUENBUGw3M2E1", // CABA
-  gba_norte:       "TUxBUEdSQWU4ZDkz",
-  gba_oeste:       "TUxBUEdSQWVmNTVm",
-  gba_sur:         "TUxBUEdSQXJlMDNm",
-  bsas_costa:      "TUxBUENPU2ExMmFkMw",
-  bsas_interior:   "TUxBUFpPTmFpbnRl",
+const API = {
+  listings: "/api/listings",
+  one: (id) => `/api/listings/${encodeURIComponent(id)}`,
+  import: "/api/listings/import",
+  authStatus: "/api/auth/status",
 };
 
-// Variantes objetivo. Cada una con un patrón regex para matching por título
-// y un patrón opcional de exclusión para evitar falsos positivos.
+// ------------------------------------------------------------
+// Constantes
+// ------------------------------------------------------------
 const VARIANTS = [
-  {
-    id: "ltz_plus",
-    label: "LTZ Plus",
-    badge: "gold",
-    match: /\bLTZ\s*(\+|PLUS)\b/i,
-  },
-  {
-    id: "premier",
-    label: "Premier",
-    badge: "green",
-    match: /\bPREMIER\b/i,
-  },
-  {
-    id: "ltz_turbo",
-    label: "1.4 Turbo LTZ",
-    badge: null,
-    match: /1[\.,]?4\s*TURBO\s*LTZ/i,
-  },
-  {
-    id: "ltz",
-    label: "LTZ",
-    badge: null,
-    match: /\bLTZ\b/i,
-    exclude: /(\bLTZ\s*(\+|PLUS)\b|\bPREMIER\b|1[\.,]?4\s*TURBO\s*LTZ)/i,
-  },
+  { id: "ltz_plus", label: "LTZ Plus", badgeClass: "gold" },
+  { id: "premier", label: "Premier", badgeClass: "green" },
+  { id: "ltz_turbo", label: "1.4 Turbo LTZ", badgeClass: "" },
+  { id: "ltz", label: "LTZ", badgeClass: "" },
+  { id: "otro", label: "Otro", badgeClass: "" },
 ];
 
-// Queries de búsqueda. Hacemos 2 búsquedas separadas y las
-// fusionamos para asegurarnos de capturar tanto LTZ como Premier.
-const SEARCH_QUERIES = [
-  "Chevrolet Cruze LTZ",
-  "Chevrolet Cruze Premier",
+const STATUSES = [
+  { id: "interesado", label: "Interesado" },
+  { id: "contactado", label: "Contactado" },
+  { id: "visitado", label: "Visitado" },
+  { id: "descartado", label: "Descartado" },
+];
+
+const SOURCES = [
+  { id: "mercadolibre", label: "Mercado Libre", icon: "ml" },
+  { id: "facebook_marketplace", label: "Marketplace", icon: "fb" },
+  { id: "otro", label: "Otro", icon: null },
 ];
 
 // ------------------------------------------------------------
 // Estado global
 // ------------------------------------------------------------
 const state = {
-  rawItems: new Map(), // id -> item
-  filteredItems: [],
-  totalApi: 0,
-  offset: 0,
+  items: [], // todas las listings cargadas del backend
   loading: false,
   filters: {
     text: "",
     variants: new Set(VARIANTS.map((v) => v.id)),
-    region: "caba", // 'caba' | 'bsas' | 'ambas'
+    statuses: new Set(STATUSES.map((s) => s.id)),
+    sources: new Set(SOURCES.map((s) => s.id)),
     yearMin: null,
     yearMax: null,
     priceMin: null,
     priceMax: null,
     kmMax: null,
-    sort: "relevance",
+    sort: "created_desc",
   },
+  editingId: null, // id de la listing que se está editando, o null para nueva
 };
 
 // ------------------------------------------------------------
@@ -103,12 +74,10 @@ const fmtMoney = (value, currency = "USD") => {
     return `${currency} ${Math.round(value).toLocaleString("es-AR")}`;
   }
 };
-
 const fmtKm = (km) => {
   if (km == null || isNaN(km)) return "—";
   return `${Number(km).toLocaleString("es-AR")} km`;
 };
-
 const escapeHtml = (str = "") =>
   String(str)
     .replace(/&/g, "&amp;")
@@ -117,186 +86,71 @@ const escapeHtml = (str = "") =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 
-// Mejorar la calidad de la imagen del thumbnail (-I -> -O da el original)
-const upgradeImg = (url) => {
-  if (!url) return "";
-  return url.replace(/-I\.(jpg|jpeg|webp|png)/i, "-O.$1").replace(/^http:/, "https:");
-};
+const variantById = (id) => VARIANTS.find((v) => v.id === id) || VARIANTS[VARIANTS.length - 1];
+const statusById = (id) => STATUSES.find((s) => s.id === id);
+const sourceById = (id) => SOURCES.find((s) => s.id === id) || SOURCES[SOURCES.length - 1];
 
-// ------------------------------------------------------------
-// Acceso a atributos de items de ML
-// ------------------------------------------------------------
-const getAttr = (item, ...ids) => {
-  if (!item?.attributes) return null;
-  for (const id of ids) {
-    const a = item.attributes.find((x) => x.id === id);
-    if (a) return a.value_name ?? (a.values && a.values[0]?.name) ?? null;
-  }
-  return null;
-};
-
-const getAttrNumber = (item, ...ids) => {
-  const v = getAttr(item, ...ids);
-  if (v == null) return null;
-  const n = parseInt(String(v).replace(/[^\d]/g, ""), 10);
+const numOrNull = (v) => {
+  if (v === "" || v == null) return null;
+  const n = Number(v);
   return isNaN(n) ? null : n;
 };
 
-const getYear = (item) => getAttrNumber(item, "VEHICLE_YEAR", "MANUFACTURING_YEAR");
-const getKm = (item) => getAttrNumber(item, "KILOMETERS");
-const getTransmission = (item) => getAttr(item, "TRANSMISSION");
-const getFuel = (item) => getAttr(item, "FUEL_TYPE");
-const getVersion = (item) => getAttr(item, "VERSION", "TRIM");
-
-const getLocationText = (item) => {
-  const a = item.address || item.location || {};
-  const city = a.city_name || a.city?.name || "";
-  const state = a.state_name || a.state?.name || "";
-  return [city, state].filter(Boolean).join(", ") || "—";
-};
-
-const getStateName = (item) => {
-  const a = item.address || item.location || {};
-  return a.state_name || a.state?.name || "";
-};
-
 // ------------------------------------------------------------
-// Identificar variante por título
+// API client
 // ------------------------------------------------------------
-const identifyVariant = (title) => {
-  if (!title) return null;
-  for (const v of VARIANTS) {
-    if (v.exclude && v.exclude.test(title)) continue;
-    if (v.match.test(title)) return v;
-  }
-  return null;
-};
-
-// ------------------------------------------------------------
-// API: Fetch search
-// ------------------------------------------------------------
-async function searchOnce(query, { stateId, offset = 0, limit = 50 } = {}) {
-  const params = new URLSearchParams({
-    q: query,
-    limit: String(limit),
-    offset: String(offset),
-    condition: "used",
+async function apiJson(url, options = {}) {
+  const res = await fetch(url, {
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
   });
-  if (stateId) params.set("state", stateId);
-
-  const url = `${PROXY_SEARCH}?${params}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (res.status === 401) {
-    const data = await res.json().catch(() => ({}));
-    const err = new Error(data.message || "La app no está autorizada con Mercado Libre.");
-    err.code = "no_token";
-    throw err;
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
   }
   if (!res.ok) {
-    throw new Error(`Mercado Libre respondió ${res.status} para "${query}"`);
+    const err = new Error(data?.message || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.body = data;
+    throw err;
   }
-  return res.json();
+  return data;
 }
 
-async function fetchDescription(itemId) {
-  try {
-    const res = await fetch(`${PROXY_DESCRIPTION}?id=${encodeURIComponent(itemId)}`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return (data.plain_text || data.text || "").trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-// ------------------------------------------------------------
-// Carga: ejecuta múltiples búsquedas y fusiona los resultados
-// ------------------------------------------------------------
-async function runSearch({ append = false } = {}) {
-  if (state.loading) return;
+async function loadListings() {
   state.loading = true;
   showLoading(true);
-  showError(null);
-
-  if (!append) {
-    state.rawItems.clear();
-    state.offset = 0;
-  }
-
   try {
-    const stateIds = regionToStateIds(state.filters.region);
-
-    // Para cada combinación (query x state) hacemos una búsqueda en paralelo.
-    const tasks = [];
-    for (const q of SEARCH_QUERIES) {
-      if (stateIds.length === 0) {
-        tasks.push(searchOnce(q, { offset: state.offset }));
-      } else {
-        for (const sid of stateIds) {
-          tasks.push(searchOnce(q, { stateId: sid, offset: state.offset }));
-        }
-      }
-    }
-
-    const results = await Promise.allSettled(tasks);
-
-    let totalApi = 0;
-    let okResults = 0;
-    for (const r of results) {
-      if (r.status !== "fulfilled") continue;
-      okResults++;
-      totalApi += r.value?.paging?.total ?? 0;
-      for (const it of r.value.results || []) {
-        if (!state.rawItems.has(it.id)) state.rawItems.set(it.id, it);
-      }
-    }
-
-    if (okResults === 0) {
-      // Si todas las búsquedas fallaron por falta de auth, mostramos banner y salimos.
-      const authError = results.find(
-        (r) => r.status === "rejected" && r.reason?.code === "no_token"
-      );
-      if (authError) {
-        showAuthBanner();
-        throw new Error(
-          "La app aún no está autorizada con Mercado Libre. Hacé click en 'Conectar Mercado Libre' arriba."
-        );
-      }
-      throw new Error("No se pudo conectar con la API de Mercado Libre.");
-    }
-
-    state.totalApi = totalApi;
-    state.offset += 50;
-
-    applyFiltersAndRender();
-    // Cargar descripciones breves para los items visibles, en background.
-    enrichVisibleDescriptions();
+    const data = await apiJson(API.listings);
+    state.items = Array.isArray(data?.items) ? data.items : [];
   } catch (err) {
     console.error(err);
-    showError(err.message || "Error inesperado al consultar Mercado Libre.");
+    showError(err.message || "No se pudieron cargar las publicaciones.");
+    state.items = [];
   } finally {
     state.loading = false;
     showLoading(false);
     updateLastUpdate();
+    applyFiltersAndRender();
   }
 }
 
-function regionToStateIds(region) {
-  const GBA = [STATE_IDS.gba_norte, STATE_IDS.gba_oeste, STATE_IDS.gba_sur];
-  switch (region) {
-    case "caba":
-      return [STATE_IDS.capital_federal];
-    case "bsas":
-      // Provincia: GBA Norte/Oeste/Sur (cubre la gran mayoría de
-      // publicaciones de "Buenos Aires" sin saturar de pedidos).
-      return GBA;
-    case "ambas":
-      return [STATE_IDS.capital_federal, ...GBA];
-    default:
-      return [];
-  }
+async function createListing(payload) {
+  return apiJson(API.listings, { method: "POST", body: JSON.stringify(payload) });
+}
+
+async function updateListing(id, payload) {
+  return apiJson(API.one(id), { method: "PUT", body: JSON.stringify(payload) });
+}
+
+async function deleteListing(id) {
+  return apiJson(API.one(id), { method: "DELETE" });
+}
+
+async function importFromUrl(url) {
+  return apiJson(`${API.import}?url=${encodeURIComponent(url)}`);
 }
 
 // ------------------------------------------------------------
@@ -304,54 +158,43 @@ function regionToStateIds(region) {
 // ------------------------------------------------------------
 function applyFiltersAndRender() {
   const f = state.filters;
-  let items = Array.from(state.rawItems.values());
+  let items = state.items.slice();
 
-  // Filtro: variantes (por matching del título)
-  items = items.filter((it) => {
-    const variant = identifyVariant(it.title || "");
-    if (!variant) return false; // descartar si no matchea ninguna variante objetivo
-    return f.variants.has(variant.id);
-  });
+  if (f.variants.size < VARIANTS.length) {
+    items = items.filter((it) => f.variants.has(it.variant || "otro"));
+  }
+  if (f.statuses.size < STATUSES.length) {
+    items = items.filter((it) => f.statuses.has(it.status || "interesado"));
+  }
+  if (f.sources.size < SOURCES.length) {
+    items = items.filter((it) => f.sources.has(it.source || "otro"));
+  }
 
-  // Filtro: región (verificación client-side por si la API trae algo extra).
-  // Los state_name reales que usa ML son del estilo:
-  //   "Capital Federal", "Bs.As. G.B.A. Norte", "Bs.As. G.B.A. Oeste",
-  //   "Bs.As. G.B.A. Sur", "Bs.As. Costa Atlántica", "Buenos Aires Interior".
-  const isCaba = (sn) => sn === "Capital Federal";
-  const isBsAs = (sn) => sn && (sn.startsWith("Bs.As.") || sn.startsWith("Buenos Aires"));
-  items = items.filter((it) => {
-    const sn = getStateName(it);
-    if (!sn) return true; // si no viene info, lo dejamos pasar
-    if (f.region === "caba") return isCaba(sn);
-    if (f.region === "bsas") return isBsAs(sn);
-    return isCaba(sn) || isBsAs(sn); // "ambas"
-  });
-
-  // Filtro: texto libre
   if (f.text.trim()) {
     const t = f.text.toLowerCase();
     items = items.filter((it) =>
-      (it.title || "").toLowerCase().includes(t) ||
-      (it._description || "").toLowerCase().includes(t)
+      [it.title, it.description, it.notes, it.location, it.url]
+        .filter(Boolean)
+        .some((s) => String(s).toLowerCase().includes(t))
     );
   }
 
-  // Filtros: año, precio, km
   items = items.filter((it) => {
-    const year = getYear(it);
-    const km = getKm(it);
-    const price = it.price;
-
-    if (f.yearMin && year && year < f.yearMin) return false;
-    if (f.yearMax && year && year > f.yearMax) return false;
-    if (f.priceMin && price < f.priceMin) return false;
-    if (f.priceMax && price > f.priceMax) return false;
-    if (f.kmMax && km && km > f.kmMax) return false;
+    if (f.yearMin && it.year && it.year < f.yearMin) return false;
+    if (f.yearMax && it.year && it.year > f.yearMax) return false;
+    if (f.priceMin != null && it.price != null && it.price < f.priceMin) return false;
+    if (f.priceMax != null && it.price != null && it.price > f.priceMax) return false;
+    if (f.kmMax != null && it.km != null && it.km > f.kmMax) return false;
     return true;
   });
 
-  // Orden
   switch (f.sort) {
+    case "created_asc":
+      items.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+      break;
+    case "rating_desc":
+      items.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1));
+      break;
     case "price_asc":
       items.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
       break;
@@ -359,40 +202,38 @@ function applyFiltersAndRender() {
       items.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity));
       break;
     case "year_desc":
-      items.sort((a, b) => (getYear(b) ?? 0) - (getYear(a) ?? 0));
+      items.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
       break;
     case "year_asc":
-      items.sort((a, b) => (getYear(a) ?? Infinity) - (getYear(b) ?? Infinity));
+      items.sort((a, b) => (a.year ?? Infinity) - (b.year ?? Infinity));
       break;
     case "km_asc":
-      items.sort((a, b) => (getKm(a) ?? Infinity) - (getKm(b) ?? Infinity));
+      items.sort((a, b) => (a.km ?? Infinity) - (b.km ?? Infinity));
       break;
+    case "created_desc":
     default:
-      // relevance: dejar el orden devuelto por ML
+      items.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
       break;
   }
 
   state.filteredItems = items;
-  renderResults();
-  renderStats();
+  renderResults(items);
+  renderStats(items);
 }
 
 // ------------------------------------------------------------
 // Render
 // ------------------------------------------------------------
-function renderStats() {
-  const items = state.filteredItems;
-  $("#statCount").textContent = items.length.toString();
+function renderStats(items) {
+  $("#statCount").textContent = String(items.length);
   if (!items.length) {
     $("#statAvg").textContent = "—";
     $("#statMin").textContent = "—";
     $("#statMax").textContent = "—";
     return;
   }
-  // Trabajar con USD (mayoría de autos en USD); convertimos ARS a USD nominal NO,
-  // mejor mostrar mezcla: separar por currency. Para simpleza tomamos USD.
-  const usd = items.filter((i) => i.currency_id === "USD" && i.price);
-  const ars = items.filter((i) => i.currency_id === "ARS" && i.price);
+  const usd = items.filter((i) => i.currency === "USD" && i.price != null);
+  const ars = items.filter((i) => i.currency === "ARS" && i.price != null);
   const sample = usd.length >= ars.length ? usd : ars;
   const cur = usd.length >= ars.length ? "USD" : "ARS";
   if (!sample.length) {
@@ -408,189 +249,524 @@ function renderStats() {
   $("#statMax").textContent = fmtMoney(Math.max(...prices), cur);
 }
 
-function renderResults() {
+function renderResults(items) {
   const grid = $("#cards");
   grid.innerHTML = "";
-
-  $("#emptyBox").hidden = state.filteredItems.length !== 0;
-  $("#loadMoreBtn").hidden = state.filteredItems.length < 8;
+  $("#emptyBox").hidden = items.length !== 0 || state.items.length === 0 && false;
+  // El empty box muestra: si no hay items en absoluto (state.items vacío),
+  // ofrecemos agregar el primero; si hay pero los filtros los esconden, decimos otra cosa.
+  const emptyBox = $("#emptyBox");
+  if (!items.length) {
+    emptyBox.hidden = false;
+    if (state.items.length === 0) {
+      emptyBox.innerHTML = `
+        <h3>Todavía no guardaste ninguna publicación</h3>
+        <p>Hacé click en <strong>"+ Agregar publicación"</strong> arriba a la derecha y pegá la URL del primer auto que quieras seguir.</p>
+      `;
+    } else {
+      emptyBox.innerHTML = `
+        <h3>Ninguna publicación coincide con los filtros</h3>
+        <p>Probá ampliar los rangos o limpiar los filtros.</p>
+      `;
+    }
+  } else {
+    emptyBox.hidden = true;
+  }
 
   const frag = document.createDocumentFragment();
-  for (const item of state.filteredItems) {
-    frag.appendChild(buildCard(item));
-  }
+  for (const item of items) frag.appendChild(buildCard(item));
   grid.appendChild(frag);
+}
+
+function sourceIconSvg(iconId) {
+  if (iconId === "ml") {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="10"/></svg>`;
+  }
+  if (iconId === "fb") {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3v3h-3v6.95c5.05-.5 9-4.76 9-9.95z"/></svg>`;
+  }
+  return "";
+}
+
+function ratingHtml(rating) {
+  if (!rating) return "";
+  const stars = [];
+  for (let i = 1; i <= 5; i++) {
+    stars.push(`<span class="star ${i <= rating ? "" : "empty"}">★</span>`);
+  }
+  return `<span class="rating-display" title="Rating: ${rating}/5">${stars.join("")}</span>`;
 }
 
 function buildCard(item) {
   const card = document.createElement("article");
   card.className = "card";
+  if (item.status === "descartado") card.classList.add("is-descartado");
   card.dataset.id = item.id;
 
-  const variant = identifyVariant(item.title || "");
-  const year = getYear(item);
-  const km = getKm(item);
-  const trans = getTransmission(item);
-  const img = upgradeImg(item.thumbnail || item.secure_thumbnail || "");
-  const desc = item._description || null;
+  const v = variantById(item.variant);
+  const src = sourceById(item.source);
+  const status = statusById(item.status) || STATUSES[0];
+  const photo = (item.photos && item.photos[0]) || "";
 
-  const badgeHtml = variant
-    ? `<span class="badge ${variant.badge || ""}">${escapeHtml(variant.label)}</span>`
+  const badgeHtml = v && v.id !== "otro"
+    ? `<span class="badge ${v.badgeClass || ""}">${escapeHtml(v.label)}</span>`
     : "";
+
+  const statusBadge = `<span class="status-badge ${status.id}">${escapeHtml(status.label)}</span>`;
+
+  const sourceChip = src.icon
+    ? `<span class="source-chip ${src.icon}">${sourceIconSvg(src.icon)}${escapeHtml(src.label)}</span>`
+    : `<span class="source-chip">${escapeHtml(src.label)}</span>`;
 
   card.innerHTML = `
     <div class="card-image">
       ${badgeHtml}
-      <img loading="lazy" alt="${escapeHtml(item.title)}" src="${escapeHtml(img)}"
-           onerror="this.style.background='#e2e8f0';this.removeAttribute('src');" />
+      ${statusBadge}
+      ${photo
+        ? `<img loading="lazy" alt="${escapeHtml(item.title)}" src="${escapeHtml(photo)}" onerror="this.style.background='#e2e8f0';this.removeAttribute('src');" />`
+        : `<div style="width:100%;height:100%;display:grid;place-items:center;color:#94a3b8;font-size:12px;">Sin foto</div>`}
     </div>
     <div class="card-body">
-      <div class="card-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+      <div class="card-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title || "(sin título)")}</div>
       <div class="card-price">
-        ${fmtMoney(item.price, item.currency_id || "USD")}
-        ${item.original_price && item.original_price > item.price
-          ? `<small style="text-decoration:line-through; color:#94a3b8; margin-left:6px;">${fmtMoney(item.original_price, item.currency_id || "USD")}</small>`
-          : ""}
+        ${fmtMoney(item.price, item.currency || "USD")}
       </div>
       <div class="card-attrs">
-        ${year ? `<span class="attr year">${year}</span>` : ""}
-        ${km != null ? `<span class="attr km">${fmtKm(km)}</span>` : ""}
-        ${trans ? `<span class="attr trans">${escapeHtml(trans)}</span>` : ""}
+        ${item.year ? `<span class="attr year">${item.year}</span>` : ""}
+        ${item.km != null ? `<span class="attr km">${fmtKm(item.km)}</span>` : ""}
+        ${item.transmission ? `<span class="attr trans">${escapeHtml(item.transmission)}</span>` : ""}
       </div>
       <div class="card-location" title="Ubicación">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/>
           <circle cx="12" cy="10" r="3"/>
         </svg>
-        ${escapeHtml(getLocationText(item))}
+        ${escapeHtml(item.location || "—")}
       </div>
-      <div class="card-desc ${desc ? "" : "placeholder"}" data-desc>
-        ${desc ? escapeHtml(desc.slice(0, 200)) + (desc.length > 200 ? "…" : "") : "Cargando descripción…"}
+      <div class="card-meta-row">
+        ${sourceChip}
+        ${ratingHtml(item.rating)}
+      </div>
+      <div class="card-desc ${item.notes ? "" : (item.description ? "" : "placeholder")}">
+        ${
+          item.notes
+            ? escapeHtml(String(item.notes).slice(0, 200)) + (item.notes.length > 200 ? "…" : "")
+            : item.description
+              ? escapeHtml(String(item.description).slice(0, 200)) + (item.description.length > 200 ? "…" : "")
+              : "Sin notas ni descripción."
+        }
       </div>
       <div class="card-footer">
-        <span class="small">ID: ${escapeHtml(item.id)}</span>
-        <span class="ml-link">Ver detalles →</span>
+        <a class="ml-link" href="${escapeHtml(item.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">Abrir publicación →</a>
+        <div class="actions">
+          <button class="icon-btn" type="button" data-action="edit" title="Editar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+            </svg>
+          </button>
+          <button class="icon-btn danger" type="button" data-action="delete" title="Borrar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+              <path d="M10 11v6"></path>
+              <path d="M14 11v6"></path>
+              <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   `;
 
-  card.addEventListener("click", () => openModal(item));
+  card.addEventListener("click", (e) => {
+    const actionBtn = e.target.closest("[data-action]");
+    if (actionBtn) {
+      e.stopPropagation();
+      const action = actionBtn.dataset.action;
+      if (action === "edit") openFormModal(item);
+      else if (action === "delete") confirmDelete(item);
+      return;
+    }
+    if (e.target.closest("a")) return;
+    openDetailModal(item);
+  });
+
   return card;
 }
 
 // ------------------------------------------------------------
-// Descripciones (lazy / batched)
+// Modal de detalle (read-only-ish)
 // ------------------------------------------------------------
-async function enrichVisibleDescriptions() {
-  const items = state.filteredItems.slice(0, 30); // primeras 30 visibles
-  const concurrency = 5;
-  let idx = 0;
-  const workers = Array.from({ length: concurrency }, () => worker());
-  await Promise.all(workers);
+function openDetailModal(item) {
+  const modal = $("#detailModal");
+  const body = $("#detailModalBody");
+  const v = variantById(item.variant);
+  const src = sourceById(item.source);
+  const status = statusById(item.status) || STATUSES[0];
+  const photos = item.photos || [];
+  const heroPhoto = photos[0];
 
-  async function worker() {
-    while (idx < items.length) {
-      const i = idx++;
-      const it = items[i];
-      if (it._description !== undefined) continue;
-      const text = await fetchDescription(it.id);
-      it._description = text || "";
-      updateCardDescription(it);
-    }
-  }
-}
-
-function updateCardDescription(item) {
-  const card = document.querySelector(`.card[data-id="${CSS.escape(item.id)}"]`);
-  if (!card) return;
-  const el = card.querySelector("[data-desc]");
-  if (!el) return;
-  if (!item._description) {
-    el.textContent = "Sin descripción cargada por el vendedor.";
-    el.classList.add("placeholder");
-  } else {
-    const t = item._description.replace(/\s+/g, " ").trim();
-    el.textContent = t.slice(0, 200) + (t.length > 200 ? "…" : "");
-    el.classList.remove("placeholder");
-  }
-}
-
-// ------------------------------------------------------------
-// Modal de detalle
-// ------------------------------------------------------------
-function openModal(item) {
-  const modal = $("#modal");
-  const body = $("#modalBody");
-  const year = getYear(item);
-  const km = getKm(item);
-  const trans = getTransmission(item);
-  const fuel = getFuel(item);
-  const version = getVersion(item);
-  const img = upgradeImg(item.thumbnail || item.secure_thumbnail || "");
+  const photosHtml = photos.length > 1
+    ? `<div class="photos-preview">${photos.slice(1).map((p) => `<a class="thumb" style="background-image:url('${escapeHtml(p)}')" href="${escapeHtml(p)}" target="_blank" rel="noopener"></a>`).join("")}</div>`
+    : "";
 
   body.innerHTML = `
-    <div class="modal-hero">
-      <img alt="${escapeHtml(item.title)}" src="${escapeHtml(img)}" />
+    <div class="modal-hero" style="${heroPhoto ? "" : "padding:48px 24px;text-align:center;color:#94a3b8;"}">
+      ${heroPhoto
+        ? `<img alt="${escapeHtml(item.title)}" src="${escapeHtml(heroPhoto)}" />`
+        : "Sin foto"}
     </div>
     <div class="modal-content">
-      <h3 id="modalTitle">${escapeHtml(item.title)}</h3>
-      <div class="modal-price">${fmtMoney(item.price, item.currency_id || "USD")}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div>
+          <h3 id="detailModalTitle">${escapeHtml(item.title || "(sin título)")}</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            ${src.icon ? `<span class="source-chip ${src.icon}">${sourceIconSvg(src.icon)}${escapeHtml(src.label)}</span>` : `<span class="source-chip">${escapeHtml(src.label)}</span>`}
+            <span class="status-badge ${status.id}" style="position:static;">${escapeHtml(status.label)}</span>
+            ${v && v.id !== "otro" ? `<span class="badge ${v.badgeClass || ""}" style="position:static;">${escapeHtml(v.label)}</span>` : ""}
+            ${ratingHtml(item.rating)}
+          </div>
+        </div>
+        <div class="modal-price">${fmtMoney(item.price, item.currency || "USD")}</div>
+      </div>
+
       <div class="modal-attrs">
-        ${attrRow("Año", year ?? "—")}
-        ${attrRow("Kilometraje", km != null ? fmtKm(km) : "—")}
-        ${attrRow("Versión", version ?? "—")}
-        ${attrRow("Transmisión", trans ?? "—")}
-        ${attrRow("Combustible", fuel ?? "—")}
-        ${attrRow("Ubicación", getLocationText(item))}
+        ${attrRow("Año", item.year ?? "—")}
+        ${attrRow("Kilometraje", item.km != null ? fmtKm(item.km) : "—")}
+        ${attrRow("Transmisión", item.transmission ?? "—")}
+        ${attrRow("Combustible", item.fuel ?? "—")}
+        ${attrRow("Ubicación", item.location ?? "—")}
+        ${attrRow("Agregado", formatDate(item.created_at))}
       </div>
-      <div>
-        <strong>Descripción del vendedor</strong>
-        <div class="modal-desc" id="modalDesc">${
-          item._description !== undefined
-            ? (item._description ? escapeHtml(item._description) : "Sin descripción cargada por el vendedor.")
-            : "Cargando descripción…"
-        }</div>
-      </div>
+
+      ${item.description
+        ? `<div><strong>Descripción</strong><div class="modal-desc">${escapeHtml(item.description)}</div></div>`
+        : ""}
+
+      ${item.notes
+        ? `<div><strong>Notas privadas</strong><div class="modal-desc" style="background:#fffbeb;border-color:#fde68a;">${escapeHtml(item.notes)}</div></div>`
+        : ""}
+
+      ${photosHtml}
+
       <div class="modal-actions">
-        <a class="btn btn-primary" href="${escapeHtml(item.permalink)}" target="_blank" rel="noopener">
-          Abrir publicación en Mercado Libre
-        </a>
-        <button class="btn btn-secondary" data-close type="button">Cerrar</button>
+        <a class="btn btn-primary" href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Abrir publicación original →</a>
+        <button class="btn btn-secondary" type="button" data-action="edit-from-detail">Editar</button>
+        <button class="btn btn-danger" type="button" data-action="delete-from-detail">Borrar</button>
+        <button class="btn btn-ghost" type="button" data-close style="margin-left:auto;color:var(--text-soft);border-color:var(--surface-border);background:var(--surface);">Cerrar</button>
       </div>
     </div>
   `;
 
-  modal.hidden = false;
-  modal.setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
+  body.querySelector('[data-action="edit-from-detail"]').addEventListener("click", () => {
+    closeModal(modal);
+    openFormModal(item);
+  });
+  body.querySelector('[data-action="delete-from-detail"]').addEventListener("click", () => {
+    closeModal(modal);
+    confirmDelete(item);
+  });
 
-  // Si aún no tenemos la descripción cargada, traerla ahora
-  if (item._description === undefined) {
-    fetchDescription(item.id).then((text) => {
-      item._description = text || "";
-      const el = $("#modalDesc");
-      if (el) el.textContent = item._description || "Sin descripción cargada por el vendedor.";
-    });
-  }
+  openModal(modal);
 }
 
 function attrRow(k, v) {
   return `<div class="modal-attr-row"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(String(v))}</span></div>`;
 }
 
-function closeModal() {
-  const modal = $("#modal");
-  modal.hidden = true;
-  modal.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
+function formatDate(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" }) + " · " +
+           d.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+// ------------------------------------------------------------
+// Modal de formulario (crear / editar)
+// ------------------------------------------------------------
+function openFormModal(item = null) {
+  const modal = $("#formModal");
+  const form = $("#listingForm");
+  form.reset();
+  $("#formError").hidden = true;
+  $("#detectMsg").hidden = true;
+
+  state.editingId = item?.id || null;
+
+  $("#formModalTitle").textContent = item ? "Editar publicación" : "Nueva publicación";
+  $("#formModalSub").innerHTML = item
+    ? "Modificá los campos que necesites y dale a <strong>Guardar</strong>."
+    : "Pegá la URL y completá los datos. Si es de Mercado Libre, podés usar <strong>Detectar</strong> para autocompletar.";
+
+  setFormValues({
+    id: item?.id || "",
+    url: item?.url || "",
+    title: item?.title || "",
+    source: item?.source || "mercadolibre",
+    variant: item?.variant || "otro",
+    status: item?.status || "interesado",
+    price: item?.price ?? "",
+    currency: item?.currency || "USD",
+    year: item?.year ?? "",
+    km: item?.km ?? "",
+    transmission: item?.transmission || "",
+    fuel: item?.fuel || "",
+    location: item?.location || "",
+    description: item?.description || "",
+    notes: item?.notes || "",
+    photos: (item?.photos || []).join("\n"),
+    rating: item?.rating ?? "",
+  });
+
+  renderRatingStars(item?.rating ?? null);
+  renderPhotosPreview(item?.photos || []);
+
+  $("#formDeleteBtn").hidden = !item;
+  openModal(modal);
+  setTimeout(() => $("#f_url")?.focus(), 50);
+}
+
+function setFormValues(values) {
+  for (const [key, value] of Object.entries(values)) {
+    const el = document.querySelector(`#listingForm [name="${key}"]`);
+    if (!el) continue;
+    el.value = value == null ? "" : value;
+  }
+}
+
+function readFormValues() {
+  const f = $("#listingForm");
+  const fd = new FormData(f);
+  const obj = Object.fromEntries(fd.entries());
+
+  const photos = (obj.photos || "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  return {
+    url: (obj.url || "").trim(),
+    title: (obj.title || "").trim(),
+    source: obj.source || null,
+    variant: obj.variant || null,
+    status: obj.status || null,
+    price: obj.price ? Number(obj.price) : null,
+    currency: obj.currency || null,
+    year: obj.year ? Number(obj.year) : null,
+    km: obj.km ? Number(obj.km) : null,
+    transmission: obj.transmission || null,
+    fuel: obj.fuel || null,
+    location: (obj.location || "").trim() || null,
+    description: (obj.description || "").trim() || null,
+    notes: (obj.notes || "").trim() || null,
+    photos,
+    rating: obj.rating ? Number(obj.rating) : null,
+  };
+}
+
+function renderRatingStars(rating) {
+  const wrap = $("#ratingStars");
+  wrap.innerHTML = "";
+  for (let i = 1; i <= 5; i++) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = rating && i <= rating ? "active" : "";
+    btn.dataset.value = String(i);
+    btn.textContent = "★";
+    btn.title = `${i} estrella${i > 1 ? "s" : ""}`;
+    btn.addEventListener("click", () => {
+      $("#f_rating").value = String(i);
+      renderRatingStars(i);
+    });
+    wrap.appendChild(btn);
+  }
+  if (rating) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "clear-rating";
+    clear.textContent = "Limpiar";
+    clear.addEventListener("click", () => {
+      $("#f_rating").value = "";
+      renderRatingStars(null);
+    });
+    wrap.appendChild(clear);
+  }
+}
+
+function renderPhotosPreview(urls) {
+  const wrap = $("#photosPreview");
+  wrap.innerHTML = "";
+  for (const u of urls.slice(0, 12)) {
+    const div = document.createElement("div");
+    div.className = "thumb";
+    div.style.backgroundImage = `url('${u.replace(/'/g, "%27")}')`;
+    wrap.appendChild(div);
+  }
+}
+
+// ------------------------------------------------------------
+// Auto-fill (botón Detectar)
+// ------------------------------------------------------------
+async function handleDetect() {
+  const url = $("#f_url").value.trim();
+  const msg = $("#detectMsg");
+
+  if (!url) {
+    msg.hidden = false;
+    msg.className = "detect-msg warn";
+    msg.textContent = "Pegá primero la URL.";
+    return;
+  }
+
+  msg.hidden = false;
+  msg.className = "detect-msg loading";
+  msg.innerHTML = `<div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Detectando datos…`;
+
+  const detectBtn = $("#detectBtn");
+  detectBtn.disabled = true;
+
+  try {
+    const data = await importFromUrl(url);
+
+    if (data.autofilled === false) {
+      msg.className = "detect-msg warn";
+      msg.textContent =
+        data.message ||
+        "No se pudo autocompletar desde esta URL. Cargá los datos a mano.";
+      // Pero igual seteamos la source si la detectó
+      if (data.source) $("#f_source").value = data.source;
+      return;
+    }
+
+    // Source autodetectada
+    if (data.source) $("#f_source").value = data.source;
+
+    // Llenar campos sólo si están vacíos (para no pisar lo que el usuario ya cargó)
+    const fields = ["title", "variant", "price", "currency", "year", "km", "transmission", "fuel", "location", "description"];
+    let touched = 0;
+    for (const k of fields) {
+      const el = document.querySelector(`#listingForm [name="${k}"]`);
+      if (!el) continue;
+      const cur = (el.value || "").trim();
+      if (cur === "" && data[k] != null && data[k] !== "") {
+        el.value = data[k];
+        touched++;
+      }
+    }
+
+    // Photos: sólo pisamos si el textarea está vacío
+    if (Array.isArray(data.photos) && data.photos.length) {
+      const photosEl = $("#f_photos");
+      if (!photosEl.value.trim()) {
+        photosEl.value = data.photos.join("\n");
+        renderPhotosPreview(data.photos);
+        touched++;
+      }
+    }
+
+    msg.className = "detect-msg ok";
+    msg.textContent = `Autocompletado desde Mercado Libre · ${touched} campo${touched !== 1 ? "s" : ""} actualizado${touched !== 1 ? "s" : ""}.`;
+  } catch (err) {
+    msg.className = "detect-msg err";
+    msg.textContent = err.message || "No se pudo autocompletar.";
+  } finally {
+    detectBtn.disabled = false;
+  }
+}
+
+// ------------------------------------------------------------
+// Submit (crear o actualizar)
+// ------------------------------------------------------------
+async function handleFormSubmit(ev) {
+  ev.preventDefault();
+  const values = readFormValues();
+  const errBox = $("#formError");
+  errBox.hidden = true;
+
+  if (!values.url) {
+    errBox.hidden = false;
+    errBox.textContent = "La URL es obligatoria.";
+    return;
+  }
+  if (!values.title) {
+    errBox.hidden = false;
+    errBox.textContent = "El título es obligatorio.";
+    return;
+  }
+
+  const saveBtn = $("#formSaveBtn");
+  saveBtn.disabled = true;
+  const originalText = saveBtn.textContent;
+  saveBtn.textContent = "Guardando…";
+
+  try {
+    let saved;
+    if (state.editingId) {
+      saved = await updateListing(state.editingId, values);
+      const idx = state.items.findIndex((x) => x.id === saved.id);
+      if (idx !== -1) state.items[idx] = saved;
+    } else {
+      saved = await createListing(values);
+      state.items = [saved, ...state.items];
+    }
+    closeModal($("#formModal"));
+    applyFiltersAndRender();
+  } catch (err) {
+    errBox.hidden = false;
+    errBox.textContent = err.message || "No se pudo guardar.";
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalText;
+  }
+}
+
+// ------------------------------------------------------------
+// Borrar
+// ------------------------------------------------------------
+async function confirmDelete(item) {
+  const ok = window.confirm(
+    `¿Borrar la publicación "${item.title || item.id}"?\n\nEsto NO borra nada en Mercado Libre/Facebook, solo en tu lista guardada.`
+  );
+  if (!ok) return;
+  try {
+    await deleteListing(item.id);
+    state.items = state.items.filter((x) => x.id !== item.id);
+    applyFiltersAndRender();
+  } catch (err) {
+    showError(err.message || "No se pudo borrar.");
+  }
 }
 
 // ------------------------------------------------------------
 // UI helpers
 // ------------------------------------------------------------
+function openModal(modal) {
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function closeModal(modal) {
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  // Si no hay ningún otro modal abierto, libero el body
+  const anyOpen = $$(".modal").some((m) => !m.hidden);
+  if (!anyOpen) document.body.style.overflow = "";
+}
+
+function closeAllModals() {
+  $$(".modal").forEach((m) => closeModal(m));
+}
+
 function showLoading(on) {
   $("#loading").hidden = !on;
 }
+
 function showError(msg) {
   const box = $("#errorBox");
   if (!msg) {
@@ -601,18 +777,19 @@ function showError(msg) {
   box.hidden = false;
   box.textContent = msg;
 }
+
 function updateLastUpdate() {
   const now = new Date();
   const t = now.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
-  $("#lastUpdate").textContent = `Actualizado: ${t}`;
+  $("#lastUpdate").textContent = `Cargado: ${t}`;
 }
 
 // ------------------------------------------------------------
-// Estado de conexión con Mercado Libre
+// Auth status
 // ------------------------------------------------------------
 async function checkAuthStatus() {
   try {
-    const r = await fetch("/api/auth/status", { headers: { Accept: "application/json" } });
+    const r = await fetch(API.authStatus, { headers: { Accept: "application/json" } });
     const s = await r.json();
     renderAuthStatus(s);
     return s;
@@ -630,7 +807,7 @@ function renderAuthStatus(s) {
 
   if (!s.has_credentials) {
     pill.classList.add("pill-err");
-    text.textContent = "Faltan credenciales";
+    text.textContent = "Faltan credenciales ML";
     btn.hidden = true;
     return;
   }
@@ -638,75 +815,34 @@ function renderAuthStatus(s) {
     pill.classList.add("pill-err");
     text.textContent = "KV no configurado";
     btn.hidden = true;
-    showKvWarning();
     return;
   }
   if (!s.connected) {
     pill.classList.add("pill-warn");
-    text.textContent = "Sin autorizar";
+    text.textContent = "Sin autorizar ML";
     btn.hidden = false;
-    showAuthBanner();
     return;
   }
   pill.classList.add("pill-ok");
-  text.textContent = s.user_id ? `Conectado · ${s.user_id}` : "Conectado";
+  text.textContent = s.user_id ? `ML · ${s.user_id}` : "Conectado a ML";
   btn.hidden = true;
-  hideAuthBanner();
-}
-
-function showAuthBanner() {
-  if ($("#authBanner")) return;
-  const banner = document.createElement("div");
-  banner.id = "authBanner";
-  banner.className = "auth-banner";
-  banner.innerHTML = `
-    <div>
-      <strong>Falta autorizar la app con Mercado Libre</strong>
-      <span>Hacé click acá una sola vez para que la página pueda traer publicaciones reales en vivo.</span>
-    </div>
-    <a class="btn btn-primary" href="/api/auth/login">Autorizar ahora →</a>
-  `;
-  const results = $(".results");
-  results.insertBefore(banner, results.firstChild);
-}
-
-function hideAuthBanner() {
-  const b = $("#authBanner");
-  if (b) b.remove();
-}
-
-function showKvWarning() {
-  if ($("#authBanner")) return;
-  const banner = document.createElement("div");
-  banner.id = "authBanner";
-  banner.className = "auth-banner";
-  banner.innerHTML = `
-    <div>
-      <strong>Falta activar Vercel KV</strong>
-      <span>El proyecto necesita una base KV para guardar el token. Andá a Vercel → Storage → Create Database → KV (Upstash Redis), linkealo a este proyecto y redeployá.</span>
-    </div>
-  `;
-  const results = $(".results");
-  results.insertBefore(banner, results.firstChild);
 }
 
 // ------------------------------------------------------------
-// Render variant chips
+// Filter chips render
 // ------------------------------------------------------------
-function renderVariantChips() {
-  const wrap = $("#variantChips");
+function renderToggleChips(wrapId, items, getActive, setActive) {
+  const wrap = $(`#${wrapId}`);
   wrap.innerHTML = "";
-  for (const v of VARIANTS) {
-    const id = `chip-${v.id}`;
+  for (const it of items) {
     const label = document.createElement("label");
-    label.className = "chip" + (state.filters.variants.has(v.id) ? " active" : "");
+    label.className = "chip" + (getActive(it.id) ? " active" : "");
     label.innerHTML = `
-      <input id="${id}" type="checkbox" ${state.filters.variants.has(v.id) ? "checked" : ""} />
-      ${escapeHtml(v.label)}
+      <input type="checkbox" ${getActive(it.id) ? "checked" : ""} />
+      ${escapeHtml(it.label)}
     `;
     label.querySelector("input").addEventListener("change", (e) => {
-      if (e.target.checked) state.filters.variants.add(v.id);
-      else state.filters.variants.delete(v.id);
+      setActive(it.id, e.target.checked);
       label.classList.toggle("active", e.target.checked);
       applyFiltersAndRender();
     });
@@ -714,24 +850,31 @@ function renderVariantChips() {
   }
 }
 
-// ------------------------------------------------------------
-// Lectura de filtros desde el formulario
-// ------------------------------------------------------------
-function readFiltersFromUI() {
+function renderAllChips() {
+  renderToggleChips(
+    "variantChips", VARIANTS,
+    (id) => state.filters.variants.has(id),
+    (id, on) => { on ? state.filters.variants.add(id) : state.filters.variants.delete(id); }
+  );
+  renderToggleChips(
+    "statusChips", STATUSES,
+    (id) => state.filters.statuses.has(id),
+    (id, on) => { on ? state.filters.statuses.add(id) : state.filters.statuses.delete(id); }
+  );
+  renderToggleChips(
+    "sourceChips", SOURCES,
+    (id) => state.filters.sources.has(id),
+    (id, on) => { on ? state.filters.sources.add(id) : state.filters.sources.delete(id); }
+  );
+}
+
+function readNumericFiltersFromUI() {
   const f = state.filters;
-  f.text = $("#searchInput").value.trim();
-  f.region = (document.querySelector('input[name="state"]:checked')?.value) || "caba";
   f.yearMin = numOrNull($("#yearMin").value);
   f.yearMax = numOrNull($("#yearMax").value);
   f.priceMin = numOrNull($("#priceMin").value);
   f.priceMax = numOrNull($("#priceMax").value);
   f.kmMax = numOrNull($("#kmMax").value);
-  f.sort = $("#sortSelect").value || "relevance";
-}
-function numOrNull(v) {
-  if (v === "" || v == null) return null;
-  const n = Number(v);
-  return isNaN(n) ? null : n;
 }
 
 function resetFilters() {
@@ -741,11 +884,20 @@ function resetFilters() {
   $("#priceMin").value = "";
   $("#priceMax").value = "";
   $("#kmMax").value = "";
-  $("#sortSelect").value = "relevance";
-  document.querySelector('input[name="state"][value="caba"]').checked = true;
-  state.filters.variants = new Set(VARIANTS.map((v) => v.id));
-  renderVariantChips();
-  readFiltersFromUI();
+  $("#sortSelect").value = "created_desc";
+  state.filters = {
+    text: "",
+    variants: new Set(VARIANTS.map((v) => v.id)),
+    statuses: new Set(STATUSES.map((s) => s.id)),
+    sources: new Set(SOURCES.map((s) => s.id)),
+    yearMin: null,
+    yearMax: null,
+    priceMin: null,
+    priceMax: null,
+    kmMax: null,
+    sort: "created_desc",
+  };
+  renderAllChips();
   applyFiltersAndRender();
 }
 
@@ -753,19 +905,11 @@ function resetFilters() {
 // Wire-up
 // ------------------------------------------------------------
 function init() {
-  renderVariantChips();
+  renderAllChips();
 
-  $("#applyFilters").addEventListener("click", () => {
-    readFiltersFromUI();
-    // Si cambió la región, hay que recargar contra la API (el state filter cambia).
-    runSearch({ append: false });
-  });
-  $("#resetFilters").addEventListener("click", () => {
-    resetFilters();
-    runSearch({ append: false });
-  });
-  $("#refreshBtn").addEventListener("click", () => runSearch({ append: false }));
-  $("#loadMoreBtn").addEventListener("click", () => runSearch({ append: true }));
+  $("#addBtn").addEventListener("click", () => openFormModal(null));
+  $("#resetFilters").addEventListener("click", resetFilters);
+
   $("#searchInput").addEventListener("input", () => {
     state.filters.text = $("#searchInput").value.trim();
     applyFiltersAndRender();
@@ -774,21 +918,43 @@ function init() {
     state.filters.sort = $("#sortSelect").value;
     applyFiltersAndRender();
   });
+  for (const id of ["yearMin", "yearMax", "priceMin", "priceMax", "kmMax"]) {
+    $(`#${id}`).addEventListener("change", () => {
+      readNumericFiltersFromUI();
+      applyFiltersAndRender();
+    });
+  }
 
-  // Modal
-  $("#modal").addEventListener("click", (e) => {
-    if (e.target.matches("[data-close]")) closeModal();
-  });
+  // Modales: click en backdrop o data-close
+  for (const m of $$(".modal")) {
+    m.addEventListener("click", (e) => {
+      if (e.target.matches("[data-close]")) closeModal(m);
+    });
+  }
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeModal();
+    if (e.key === "Escape") closeAllModals();
   });
 
-  // Verificar el estado de auth y luego correr la búsqueda inicial.
-  readFiltersFromUI();
-  checkAuthStatus().then((s) => {
-    if (s?.connected) runSearch({ append: false });
-    else showLoading(false); // que no quede el spinner
+  // Form
+  $("#listingForm").addEventListener("submit", handleFormSubmit);
+  $("#detectBtn").addEventListener("click", handleDetect);
+  $("#formDeleteBtn").addEventListener("click", async () => {
+    if (!state.editingId) return;
+    const item = state.items.find((x) => x.id === state.editingId);
+    if (!item) return;
+    closeModal($("#formModal"));
+    confirmDelete(item);
   });
+
+  // Preview de fotos al editar el textarea
+  $("#f_photos").addEventListener("input", () => {
+    const urls = $("#f_photos").value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    renderPhotosPreview(urls);
+  });
+
+  // Carga inicial
+  checkAuthStatus();
+  loadListings();
 }
 
 document.addEventListener("DOMContentLoaded", init);

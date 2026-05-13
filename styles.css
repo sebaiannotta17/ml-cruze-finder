@@ -660,3 +660,303 @@ a:hover { text-decoration: underline; }
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* ============================================================
+ * PIVOT: gestor manual de listings — extensiones de UI
+ * ============================================================ */
+
+/* Status badge: posicionado arriba a la derecha de la imagen */
+.status-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
+  background: rgba(15, 23, 42, 0.85);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.status-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  opacity: 0.85;
+}
+.status-badge.interesado { background: rgba(37, 99, 235, 0.92); color: #fff; }
+.status-badge.contactado { background: rgba(245, 158, 11, 0.95); color: #1c1917; }
+.status-badge.visitado { background: rgba(22, 163, 74, 0.95); color: #fff; }
+.status-badge.descartado { background: rgba(100, 116, 139, 0.95); color: #fff; opacity: 0.85; }
+
+.card.is-descartado { opacity: 0.62; }
+.card.is-descartado:hover { opacity: 1; }
+
+/* Source chip (Mercado Libre / Facebook / Otro) */
+.source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  border: 1px solid var(--surface-border);
+}
+.source-chip.ml { color: #b45309; background: #fef3c7; border-color: #fde68a; }
+.source-chip.fb { color: #1d4ed8; background: #dbeafe; border-color: #bfdbfe; }
+.source-chip svg { width: 12px; height: 12px; }
+
+/* Rating estrellitas (display read-only en cards) */
+.rating-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: #f59e0b;
+  font-size: 13px;
+  line-height: 1;
+}
+.rating-display .star.empty { color: #cbd5e1; }
+
+/* Footer de la card: precio a la izquierda, acciones a la derecha */
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-footer .actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.card-footer .icon-btn {
+  background: transparent;
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text-soft);
+  transition: all 0.15s;
+  padding: 0;
+}
+.card-footer .icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.card-footer .icon-btn.danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: #fef2f2;
+}
+.card-footer .icon-btn svg { width: 14px; height: 14px; }
+
+.card-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Botón danger (borrar) */
+.btn-danger {
+  background: #fff;
+  color: var(--danger);
+  border: 1px solid #fecaca;
+}
+.btn-danger:hover { background: #fef2f2; border-color: #f87171; color: #991b1b; }
+
+/* ============================================================
+ * Modal de formulario (crear / editar listing)
+ * ============================================================ */
+.modal-panel-form {
+  width: min(820px, 100%);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 26px 24px;
+  overflow-y: auto;
+  max-height: 90vh;
+}
+
+.form-header h3 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+.form-sub {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.form-row-rating {
+  grid-template-columns: auto;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.form-group-grow {
+  grid-column: 1 / -1;
+}
+@media (min-width: 720px) {
+  .form-group-grow {
+    grid-column: span 2;
+  }
+}
+.form-group-detect {
+  max-width: 140px;
+}
+
+.form-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+.form-group textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+.form-group-detect .btn {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+}
+
+.detect-msg {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.detect-msg.ok {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+.detect-msg.warn {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+.detect-msg.err {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+.detect-msg.loading {
+  background: var(--surface-2);
+  border: 1px solid var(--surface-border);
+  color: var(--text-soft);
+}
+
+.photos-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.photos-preview .thumb {
+  width: 60px;
+  height: 60px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background-size: cover;
+  background-position: center;
+  background-color: var(--surface-2);
+}
+
+.rating-stars {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.rating-stars button {
+  background: transparent;
+  border: none;
+  font-size: 26px;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 2px;
+  line-height: 1;
+  transition: transform 0.08s, color 0.15s;
+}
+.rating-stars button:hover { transform: scale(1.15); }
+.rating-stars button.active { color: #f59e0b; }
+.rating-stars .clear-rating {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: underline;
+  margin-left: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--surface-border);
+  margin-top: 4px;
+}
+.form-actions .btn-danger { margin-left: auto; }
+
+.form-error {
+  margin-top: 0;
+}
