@@ -1,0 +1,30 @@
+# Cursor / IDE
+.cursor/
+agent-transcripts/
+terminals/
+mcps/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+
+# Dependencias (no usamos ninguna, pero por si en el futuro)
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Vercel
+.vercel
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
