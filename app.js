@@ -4,7 +4,12 @@
  *  Buenos Aires, consumiendo la API pública de Mercado Libre.
  * ============================================================ */
 
-const API_BASE = "https://api.mercadolibre.com";
+// En vez de pegarle directo a https://api.mercadolibre.com (que actualmente
+// responde 403 a requests cross-origin desde el navegador), usamos los
+// proxies serverless en /api/* que viven en este mismo deploy de Vercel.
+// Ver: api/search.js y api/description.js
+const PROXY_SEARCH = "/api/search";
+const PROXY_DESCRIPTION = "/api/description";
 const SITE = "MLA"; // Mercado Libre Argentina
 const CATEGORY_AUTOS = "MLA1744"; // Autos, Camionetas y Utilitarios
 
@@ -173,14 +178,13 @@ const identifyVariant = (title) => {
 async function searchOnce(query, { stateId, offset = 0, limit = 50 } = {}) {
   const params = new URLSearchParams({
     q: query,
-    category: CATEGORY_AUTOS,
     limit: String(limit),
     offset: String(offset),
     condition: "used",
   });
   if (stateId) params.set("state", stateId);
 
-  const url = `${API_BASE}/sites/${SITE}/search?${params}`;
+  const url = `${PROXY_SEARCH}?${params}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   if (!res.ok) {
     throw new Error(`Mercado Libre respondió ${res.status} para "${query}"`);
@@ -190,7 +194,7 @@ async function searchOnce(query, { stateId, offset = 0, limit = 50 } = {}) {
 
 async function fetchDescription(itemId) {
   try {
-    const res = await fetch(`${API_BASE}/items/${itemId}/description`, {
+    const res = await fetch(`${PROXY_DESCRIPTION}?id=${encodeURIComponent(itemId)}`, {
       headers: { Accept: "application/json" },
     });
     if (!res.ok) return null;
